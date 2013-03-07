@@ -13,14 +13,14 @@
 package {
 
   import flash.display.Sprite;
+  import flash.events.AsyncErrorEvent;
   import flash.events.Event;
   import flash.events.IOErrorEvent;
   import flash.events.MouseEvent;
-  import flash.events.SecurityErrorEvent;
-  import flash.events.AsyncErrorEvent;
   import flash.events.NetStatusEvent;
+  import flash.events.SecurityErrorEvent;
   import flash.events.TimerEvent;
-  import flash.external.ExternalInterface; // woo
+  import flash.external.ExternalInterface;
   import flash.media.Sound;
   import flash.media.SoundChannel;
   import flash.media.SoundMixer;
@@ -29,14 +29,14 @@ package {
   import flash.system.Security;
   import flash.system.System;
   import flash.text.TextField;
-  import flash.text.TextFormat;
   import flash.text.TextFieldAutoSize;
+  import flash.text.TextFormat;
   import flash.ui.ContextMenu;
   import flash.ui.ContextMenuItem;
-  import flash.utils.setInterval;
-  import flash.utils.clearInterval;
   import flash.utils.Dictionary;
   import flash.utils.Timer;
+  import flash.utils.clearInterval;
+  import flash.utils.setInterval;
 
   public class SoundManager2_AS3 extends Sprite {
 
@@ -52,7 +52,7 @@ package {
      *  When loading from HTTPS, use System.security.allowInsecureDomain();
      *  See http://livedocs.adobe.com/flash/9.0/ActionScriptLangRefV3/flash/system/Security.html#allowDomain()
      */
-    public var allow_xdomain_scripting:Boolean = false;
+    public var allow_xdomain_scripting:Boolean = true;
     public var xdomain:String = "*";
 
     // externalInterface references (for Javascript callbacks)
@@ -192,6 +192,7 @@ package {
       }
       // <d>
       ExternalInterface.call(baseJSController + "['_writeDebug']", "(Flash): " + s, null, logLevel);
+      trace(s);
       // </d>
       return true;
     }
@@ -581,7 +582,7 @@ package {
 
     public function _setPosition(sID:String, nSecOffset:Number, isPaused: Boolean, allowMultiShot: Boolean) : void {
       var s: SoundManager2_SMSound_AS3 = soundObjects[sID];
-      if (!s) return void;
+      if (!s) return;
       // writeDebug('_setPosition()');
 
       // stop current channel, start new one.
@@ -628,7 +629,7 @@ package {
       // writeDebug('_load()');
       if (typeof bAutoPlay == 'undefined') bAutoPlay = false;
       var s: SoundManager2_SMSound_AS3 = soundObjects[sID];
-      if (!s) return void;
+      if (!s) return;
       var didRecreate: Boolean = false;
       if (s.didLoad == true) {
         // need to recreate sound
@@ -681,7 +682,7 @@ package {
 
     public function _unload(sID:String) : void {
       var s: SoundManager2_SMSound_AS3 = (soundObjects[sID] || null);
-      if (!s) return void;
+      if (!s) return;
       var sURL:String = s.sURL; // save existing sound URL for object recreation
       try {
         removeEventListener(Event.ID3, onID3);
@@ -762,7 +763,7 @@ package {
     public function _destroySound(sID:String) : void {
       // for the power of garbage collection! .. er, Greyskull!
       var s: SoundManager2_SMSound_AS3 = (soundObjects[sID] || null);
-      if (!s) return void;
+      if (!s) return;
       // try to unload the sound
       for (var i: int = 0, j: int = sounds.length; i < j; i++) {
         if (sounds[i] == sID) {
@@ -811,7 +812,7 @@ package {
         SoundMixer.stopAll();
       } else {
         var s: SoundManager2_SMSound_AS3 = soundObjects[sID];
-        if (!s) return void;
+        if (!s) return;
         if (s.useNetstream && s.ns) {
           s.ns.pause();
         } else if (s.soundChannel) {
@@ -848,7 +849,7 @@ package {
     public function _pause(sID:String, allowMultiShot: Boolean) : void {
       // writeDebug('_pause(): ' + sID);
       var s: SoundManager2_SMSound_AS3 = soundObjects[sID];
-      if (!s) return void;
+      if (!s) return;
       // writeDebug('s.paused: '+s.paused);
       if (!s.paused) {
         // reference current position, stop sound

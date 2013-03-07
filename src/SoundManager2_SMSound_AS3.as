@@ -11,22 +11,30 @@
  */
 
 package {
-
-  import flash.external.*;
-  import flash.events.*;
+  
+  import flash.events.AsyncErrorEvent;
+  import flash.events.Event;
+  import flash.events.IOErrorEvent;
+  import flash.events.NetStatusEvent;
+  import flash.external.ExternalInterface;
   import flash.media.Sound;
   import flash.media.SoundChannel;
   import flash.media.SoundLoaderContext;
-  import flash.media.SoundTransform;
   import flash.media.SoundMixer;
-  import flash.net.URLRequest;
-  import flash.utils.ByteArray;
-  import flash.utils.getTimer;
+  import flash.media.SoundTransform;
   import flash.net.NetConnection;
   import flash.net.NetStream;
-
+  import flash.net.SharedObject;
+  import flash.net.URLRequest;
+  import flash.system.Security;
+  import flash.utils.ByteArray;
+  import flash.utils.clearInterval;
+  import flash.utils.clearTimeout;
+  import flash.utils.getTimer;
+  import flash.utils.setTimeout;
+  
   public class SoundManager2_SMSound_AS3 extends Sound {
-
+    
     public var sm: SoundManager2_AS3 = null;
     // externalInterface references (for Javascript callbacks)
     public var baseJSController: String = "soundManager";
@@ -73,7 +81,7 @@ package {
     public var didLoad: Boolean = false;
     public var useEvents: Boolean = false;
     public var sound: Sound = new Sound();
-
+    
     public var cc: Object;
     public var nc: NetConnection;
     public var ns: NetStream = null;
@@ -82,9 +90,12 @@ package {
     public var bufferTime: Number = 3; // previously 0.1
     public var lastNetStatus: String = null;
     public var serverUrl: String = null;
-
+    public var serverUrlTunneled: String = null;
+    
     public var checkPolicyFile:Boolean = false;
-
+    public var serverResponded:Boolean;
+    public var tunellingFallbackTimeout:*
+    
     public function SoundManager2_SMSound_AS3(oSoundManager: SoundManager2_AS3, sIDArg: String = null, sURLArg: String = null, usePeakData: Boolean = false, useWaveformData: Boolean = false, useEQData: Boolean = false, useNetstreamArg: Boolean = false, netStreamBufferTime: Number = 1, serverUrl: String = null, duration: Number = 0, autoPlay: Boolean = false, useEvents: Boolean = false, autoLoad: Boolean = false, checkPolicyFile: Boolean = false) {
       this.sm = oSoundManager;
       this.sID = sIDArg;
@@ -109,46 +120,122 @@ package {
         this.bufferTime = netStreamBufferTime;
       }
       this.checkPolicyFile = checkPolicyFile;
-
+      
+      Security.allowInsecureDomain("*");
+      
       writeDebug('SoundManager2_SMSound_AS3: Got duration: '+duration+', autoPlay: '+autoPlay);
-
+      
       if (this.useNetstream) {
         // Pause on buffer full if auto-loading an RTMP stream
         if (this.serverUrl && this.autoLoad) {
           this.pauseOnBufferFull = true;
         }
-
+        
         this.cc = new Object();
         this.nc = new NetConnection();
-
+        
         // Handle FMS bandwidth check callback.
         // @see onBWDone
         // @see http://www.adobe.com/devnet/flashmediaserver/articles/dynamic_stream_switching_04.html
         // @see http://www.johncblandii.com/index.php/2007/12/fms-a-quick-fix-for-missing-onbwdone-onfcsubscribe-etc.html
         this.nc.client = this;
-
+        
         // TODO: security/IO error handling
         // this.nc.addEventListener(SecurityErrorEvent.SECURITY_ERROR, doSecurityError);
         nc.addEventListener(NetStatusEvent.NET_STATUS, netStatusHandler);
-
+        
         if (this.serverUrl != null) {
           writeDebug('SoundManager2_SMSound_AS3: NetConnection: connecting to server ' + this.serverUrl + '...');
         }
-        this.nc.connect(serverUrl);
+       
+        
+        if(!useFallbackImmediately()){
+          this.nc.connect(serverUrl);
+          tunellingFallbackTimeout = setTimeout(connectTunneled,5000);
+        }else{
+          connectTunneled();
+        }
+       
       } else {
         this.connected = true;
       }
+      
+    }
+    
+    private function connectTunneled():void
+    {
+      clearTimeout(tunellingFallbackTimeout)
+      
+      if(nc.connected) return;
+      
+      // Only attempt a connect if the server didn't respond at all.
+      if(serverResponded) {
+        return;
+      }
+      var streamer:String = this.serverUrl;
+      // First switch to a tunneling protocol ONLY if not tunneled.
+      if(streamer.substr(0,7) == 'rtmp://') {
+        streamer = streamer.replace('rtmp://','rtmpt://');
+      } else if(streamer.substr(0,8) == 'rtmpe://') {
+        streamer = streamer.replace('rtmpe://','rtmpte://');
+      } else {
+        return;
+      }
+      // Next hard-code port 80, stripping out any existing port designation.
+      var slash:Number = streamer.indexOf('/',10);
+      var colon:Number = streamer.indexOf(':',10);
+      if(colon > -1 && colon < slash) {
+        streamer = streamer.substr(0,colon) + ':80' + streamer.substr(slash);
+      } else {
+        streamer = streamer.substr(0,slash) + ':80' + streamer.substr(slash);
+      }
+      
+      this.serverUrlTunneled = streamer;
+      
+      
+      writeDebug('SoundManager2_SMSound_AS3: NetConnection: connecting TUNNELED to server ' + this.serverUrlTunneled + '...');
+      nc.connect(this.serverUrlTunneled); 
+      
+    }
+    
+    public function useFallbackImmediately():Boolean{
+        try{
+          var so:SharedObject = SharedObject.getLocal("soundmanager2");
+          if(so.data["firstFallbackDate"] && new Date().getTime() - new Date(so.data["firstFallbackDate"]).getTime() < 1000*60*60*24){
+              return true;
+          }
+          return false;
+        }catch(e:Error){}
+        return false;
 
     }
-
+    
+    public function saveFallbackStatus():void{
+      try{
+        var so:SharedObject = SharedObject.getLocal("soundmanager2");
+        if(this.serverUrlTunneled){    
+          //Save fallback status not more then once a day, so next day we can check rtmp again
+          if(!so.data["firstFallbackDate"] || new Date().getTime() - new Date(so.data["firstFallbackDate"]).getTime() > 1000*60*60*24)
+          {
+            so.setProperty("firstFallbackDate", new Date().getTime());
+            so.flush();
+          } 
+        }else{ // remove date if we connected regularly
+          delete so.data["firstFallbackDate"];
+          so.flush();
+        }
+      }catch(e:Error){}
+    }
+    
     public function netStatusHandler(event:NetStatusEvent):void {
-
+      
       if (this.useEvents) {
         writeDebug('netStatusHandler: '+event.info.code);
       }
-
+      
+      serverResponded = true;
       switch (event.info.code) {
-
+        
         case "NetConnection.Connect.Success":
           try {
             this.ns = new NetStream(this.nc);
@@ -168,19 +255,21 @@ package {
               writeDebug('firing _onconnect for '+this.sID);
               ExternalInterface.call(this.sm.baseJSObject + "['" + this.sID + "']._onconnect", 1);
             }
+            
+           saveFallbackStatus();
           } catch(e: Error) {
             this.failed = true;
             writeDebug('netStream error: ' + e.toString());
             ExternalInterface.call(baseJSObject + "['" + this.sID + "']._onfailure", 'Connection failed!', event.info.level, event.info.code);
           }
           break;
-
+        
         case "NetStream.Play.StreamNotFound":
           this.failed = true;
           writeDebug("NetConnection: Stream not found!");
           ExternalInterface.call(baseJSObject + "['" + this.sID + "']._onfailure", 'Stream not found!', event.info.level, event.info.code);
           break;
-
+        
         // This is triggered when the sound loses the connection with the server.
         // In some cases one could just try to reconnect to the server and resume playback.
         // However for streams protected by expiring tokens, I don't think that will work.
@@ -192,44 +281,48 @@ package {
           ExternalInterface.call(baseJSObject + "['" + this.sID + "']._onfailure", 'Connection closed!', event.info.level, event.info.code);
           writeDebug("NetConnection: Connection closed!");
           break;
-
+        
         // Couldn't establish a connection with the server. Attempts to connect to the server
         // can also fail if the permissible number of socket connections on either the client
         // or the server computer is at its limit.  This also happens when the internet
         // connection is lost.
         case "NetConnection.Connect.Failed":
-          this.failed = true;
-          writeDebug("NetConnection: Connection failed! Lost internet connection? Try again... Description: " + event.info.description);
-          ExternalInterface.call(baseJSObject + "['" + this.sID + "']._onfailure", 'Connection failed!', event.info.level, event.info.code);
-          break;
-
-        // A change has occurred to the network status. This could mean that the network
-        // connection is back, or it could mean that it has been lost...just try to resume
-        // playback.
-
-        // KJV: Can't use this yet because by the time you get your connection back the
-        // song has reached it's maximum retries, so it doesn't retry again.  We need
-        // a new _ondisconnect handler.
-        //case "NetConnection.Connect.NetworkChange":
-        //  this.failed = true;
-        //  writeDebug("NetConnection: Network connection status changed");
-        //  ExternalInterface.call(baseJSObject + "['" + this.sID + "']._onfailure", 'Reconnecting...');
-        //  break;
-
-        // Consider everything else a failure...
+          if(this.serverUrlTunneled==null){
+            connectTunneled()
+          }else{
+            this.failed = true;
+            writeDebug("NetConnection: Connection failed! Lost internet connection? Try again... Description: " + event.info.description);
+            ExternalInterface.call(baseJSObject + "['" + this.sID + "']._onfailure", 'Connection failed!', event.info.level, event.info.code);
+            break;
+          }
+          
+          // A change has occurred to the network status. This could mean that the network
+          // connection is back, or it could mean that it has been lost...just try to resume
+          // playback.
+          
+          // KJV: Can't use this yet because by the time you get your connection back the
+          // song has reached it's maximum retries, so it doesn't retry again.  We need
+          // a new _ondisconnect handler.
+          //case "NetConnection.Connect.NetworkChange":
+          //  this.failed = true;
+          //  writeDebug("NetConnection: Network connection status changed");
+          //  ExternalInterface.call(baseJSObject + "['" + this.sID + "']._onfailure", 'Reconnecting...');
+          //  break;
+          
+          // Consider everything else a failure...
         default:
           this.failed = true;
           writeDebug("NetConnection: got unhandled code '" + event.info.code + "'! Description: " + event.info.description);
           ExternalInterface.call(baseJSObject + "['" + this.sID + "']._onfailure", '', event.info.level, event.info.code);
           break;
       }
-
+      
     }
-
+    
     public function writeDebug (s: String, logLevel: Number = 0) : Boolean {
       return this.sm.writeDebug (s,logLevel); // defined in main SM object
     }
-
+    
     public function metaDataHandler(infoObject: Object) : void {
       var prop:String;
       if (sm.debugEnabled) {
@@ -260,9 +353,9 @@ package {
         this.cc.onMetaData = function(infoObject: Object) : void {}
       }
     }
-
+    
     public function captionHandler(infoObject: Object) : void {
-
+      
       if (sm.debugEnabled) {
         var data:String = new String();
         for (var prop:* in infoObject) {
@@ -270,18 +363,18 @@ package {
         }
         writeDebug('Caption: '+data);
       }
-
+      
       // null this out for the duration of this object's existence.
       // it may be called multiple times.
       // this.cc.setCaption = function(infoObject: Object) : void {}
-    
+      
       // writeDebug('Caption\n'+infoObject['dynamicMetadata']);
       // writeDebug('firing _oncaptiondata for '+this.sID);
-
+      
       ExternalInterface.call(this.sm.baseJSObject + "['" + this.sID + "']._oncaptiondata", infoObject['dynamicMetadata']);
-
+      
     }
-
+    
     public function getWaveformData() : void {
       // http://livedocs.adobe.com/flash/9.0/ActionScriptLangRefV3/flash/media/SoundMixer.html#computeSpectrum()
       SoundMixer.computeSpectrum(this.waveformData, false, 0); // sample wave data at 44.1 KHz
@@ -290,7 +383,7 @@ package {
         this.waveformDataArray.push(int(this.waveformData.readFloat() * 1000) / 1000);
       }
     }
-
+    
     public function getEQData() : void {
       // http://livedocs.adobe.com/flash/9.0/ActionScriptLangRefV3/flash/media/SoundMixer.html#computeSpectrum()
       SoundMixer.computeSpectrum(this.eqData, true, 0); // sample EQ data at 44.1 KHz
@@ -299,28 +392,28 @@ package {
         this.eqDataArray.push(int(this.eqData.readFloat() * 1000) / 1000);
       }
     }
-
+    
     public function start(nMsecOffset: int, nLoops: int, allowMultiShot:Boolean) : Boolean {
-
+      
       this.useEvents = true;
-
+      
       if (this.useNetstream) {
-
+        
         writeDebug("SMSound::start nMsecOffset "+ nMsecOffset+ ' nLoops '+nLoops + ' current bufferTime '+this.ns.bufferTime+' current bufferLength '+this.ns.bufferLength+ ' this.lastValues.position '+this.lastValues.position);
-
+        
         // mark for later Netstream.Play.Stop / sound completion
         this.finished = false;
-
+        
         this.cc.onMetaData = this.metaDataHandler;
-
+        
         // Don't seek if we don't have to because it destroys the buffer
         var set_position:Boolean = this.lastValues.position != null && this.lastValues.position != nMsecOffset;
-
+        
         if (set_position) {
           // Minimize the buffer so playback starts ASAP
           this.ns.bufferTime = this.bufferTime;
         }
-
+        
         if (this.paused) {
           writeDebug('start: resuming from paused state');
           this.ns.resume(); // get the sound going again
@@ -340,7 +433,7 @@ package {
           this.pauseOnBufferFull = false;
           this.ns.play(this.sURL);
         }
-
+        
         // KJV seek after calling play otherwise some streams get a NetStream.Seek.Failed
         // Should only apply to the !didLoad case, but do it for all for simplicity.
         // nMsecOffset is in milliseconds for streams but in seconds for progressive
@@ -349,10 +442,10 @@ package {
           this.ns.seek(this.serverUrl ? nMsecOffset / 1000 : nMsecOffset);
           this.lastValues.position = nMsecOffset; // https://gist.github.com/1de8a3113cf33d0cff67
         }
-
+        
         // this.ns.addEventListener(Event.SOUND_COMPLETE, _onfinish);
         this.applyTransform();
-
+        
       } else {
         // writeDebug('start: seeking to '+nMsecOffset+', '+nLoops+(nLoops==1?' loop':' loops'));
         if (!this.soundChannel || allowMultiShot) {
@@ -370,17 +463,17 @@ package {
           this.applyTransform();
         }
       }
-
+      
       // if soundChannel is null (and not a netStream), there is no sound card (or 32-channel ceiling has been hit.)
       // http://help.adobe.com/en_US/FlashPlatform/reference/actionscript/3/flash/media/Sound.html#play%28%29
       return (!this.useNetstream && this.soundChannel === null ? false : true);
-
+      
     }
-
+    
     private function _onfinish() : void {
       this.removeEventListener(Event.SOUND_COMPLETE, _onfinish);
     }
-
+    
     public function loadSound(sURL: String) : void {
       if (this.useNetstream) {
         this.useEvents = true;
@@ -404,7 +497,7 @@ package {
         }
       }
     }
-
+    
     // Set the value of autoPlay
     public function setAutoPlay(autoPlay: Boolean) : void {
       if (!this.serverUrl) {
@@ -418,17 +511,17 @@ package {
         }
       }
     }
-
+    
     public function setVolume(nVolume: Number) : void {
       this.lastValues.volume = nVolume / 100;
       this.applyTransform();
     }
-
+    
     public function setPan(nPan: Number) : void {
       this.lastValues.pan = nPan / 100;
       this.applyTransform();
     }
-
+    
     public function applyTransform() : void {
       var st: SoundTransform = new SoundTransform(this.lastValues.volume, this.lastValues.pan);
       if (this.useNetstream) {
@@ -441,14 +534,14 @@ package {
         this.soundChannel.soundTransform = st; // new SoundTransform(this.lastValues.volume, this.lastValues.pan);
       }
     }
-
+    
     // Handle FMS bandwidth check callback.
     // @see http://www.adobe.com/devnet/flashmediaserver/articles/dynamic_stream_switching_04.html
     // @see http://www.johncblandii.com/index.php/2007/12/fms-a-quick-fix-for-missing-onbwdone-onfcsubscribe-etc.html
     public function onBWDone() : void {
       // writeDebug('onBWDone: called and ignored');
     }
-
+    
     // NetStream client callback. Invoked when the song is complete.
     public function onPlayStatus(info:Object):void {
       writeDebug('onPlayStatus called with '+info);
@@ -458,49 +551,49 @@ package {
           break;
       }
     }
-
+    
     public function doIOError(e: IOErrorEvent) : void {
       ExternalInterface.call(baseJSObject + "['" + this.sID + "']._onload", 0); // call onload, assume it failed.
       // there was a connection drop, a loss of internet connection, or something else wrong. 404 error too.
     }
-
+    
     public function doAsyncError(e: AsyncErrorEvent) : void {
       writeDebug('asyncError: ' + e.text);
     }
-
+    
     public function doNetStatus(e: NetStatusEvent) : void {
-
+      
       // Handle failures
       if (e.info.code == "NetStream.Failed"
-          || e.info.code == "NetStream.Play.FileStructureInvalid"
-          || e.info.code == "NetStream.Play.StreamNotFound") {
-
+        || e.info.code == "NetStream.Play.FileStructureInvalid"
+        || e.info.code == "NetStream.Play.StreamNotFound") {
+        
         this.lastNetStatus = e.info.code;
         writeDebug('netStatusEvent: ' + e.info.code);
         this.failed = true;
         ExternalInterface.call(baseJSObject + "['" + this.sID + "']._onfailure", '', e.info.level, e.info.code);
         return;
       }
-
+      
       writeDebug('netStatusEvent: ' + e.info.code);  // KJV we like to see all events
-
+      
       // When streaming, Stop is called when buffering stops, not when the stream is actually finished.
       // @see http://www.actionscript.org/forums/archive/index.php3/t-159194.html
       if (e.info.code == "NetStream.Play.Stop") {
-
+        
         if (!this.finished && (!this.useNetstream || !this.serverUrl)) {
-
+          
           // finished playing, and not RTMP
           writeDebug('calling onfinish for a sound');
           // reset the sound? Move back to position 0?
           this.sm.checkProgress();
           this.finished = true; // will be reset via JS callback
           ExternalInterface.call(baseJSObject + "['" + this.sID + "']._onfinish");
-
+          
         }
-
+        
       } else if (e.info.code == "NetStream.Play.Start" || e.info.code == "NetStream.Buffer.Empty" || e.info.code == "NetStream.Buffer.Full") {
-
+        
         // RTMP case..
         // We wait for the buffer to fill up before pausing the just-loaded song because only if the
         // buffer is full will the song continue to buffer until the user hits play.
@@ -513,14 +606,14 @@ package {
           writeDebug('Pausing on buffer full');
           ExternalInterface.call(baseJSObject + "['" + this.sID + "'].pause", false);
         }
-
+        
         var isNetstreamBuffering: Boolean = (e.info.code == "NetStream.Buffer.Empty" || e.info.code == "NetStream.Play.Start");
         // assume buffering when we start playing, eg. initial load.
         if (isNetstreamBuffering != this.lastValues.isBuffering) {
           this.lastValues.isBuffering = isNetstreamBuffering;
           ExternalInterface.call(baseJSObject + "['" + this.sID + "']._onbufferchange", this.lastValues.isBuffering ? 1 : 0);
         }
-
+        
         // We can detect the end of the stream when Play.Stop is called followed by Buffer.Empty.
         // However, if you pause and let the whole song buffer, Buffer.Flush is called followed by
         // Buffer.Empty, so handle that case too.
@@ -535,24 +628,24 @@ package {
             this.sm.checkProgress();
             ExternalInterface.call(baseJSObject + "['" + this.sID + "']._onfinish");
           }
-
+          
         } else if (e.info.code == "NetStream.Buffer.Empty") {
           // The buffer is empty.  Start from the smallest buffer again.
           this.ns.bufferTime = this.bufferTime;
         }
       }
-
+      
       // Remember the last NetStatus event
       this.lastNetStatus = e.info.code;
     }
-
+    
     // KJV The sound adds some of its own netstatus handlers so we don't need to do it here.
     public function addNetstreamEvents() : void {
       ns.addEventListener(AsyncErrorEvent.ASYNC_ERROR, doAsyncError);
       ns.addEventListener(NetStatusEvent.NET_STATUS, doNetStatus);
       ns.addEventListener(IOErrorEvent.IO_ERROR, doIOError);
     }
-
+    
     public function removeNetstreamEvents() : void {
       ns.removeEventListener(AsyncErrorEvent.ASYNC_ERROR, doAsyncError);
       ns.removeEventListener(NetStatusEvent.NET_STATUS, doNetStatus);
@@ -561,7 +654,7 @@ package {
       // KJV Stop listening for NetConnection events on the sound
       nc.removeEventListener(NetStatusEvent.NET_STATUS, netStatusHandler);
     }
-
+    
     // Prevents possible 'Unhandled NetStatusEvent' condition if a sound is being
     // destroyed and interacted with at the same time.
     public function dummyNetStatusHandler(e: NetStatusEvent) : void {
