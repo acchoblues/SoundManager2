@@ -26,6 +26,7 @@ package {
   import flash.net.NetStream;
   import flash.net.SharedObject;
   import flash.net.URLRequest;
+  import flash.system.Capabilities;
   import flash.system.Security;
   import flash.utils.ByteArray;
   import flash.utils.clearInterval;
@@ -172,22 +173,38 @@ package {
       if(serverResponded) {
         return;
       }
+
       var streamer:String = this.serverUrl;
-      // First switch to a tunneling protocol ONLY if not tunneled.
-      if(streamer.substr(0,7) == 'rtmp://') {
-        streamer = streamer.replace('rtmp://','rtmpt://');
-      } else if(streamer.substr(0,8) == 'rtmpe://') {
-        streamer = streamer.replace('rtmpe://','rtmpte://');
+
+      // Google Pepper plugin cannot reliably use RTMPT
+      // https://code.google.com/p/chromium/issues/detail?id=232847
+      if (Capabilities.manufacturer == "Google Pepper") {
+        // Ensure the protocol is only RTMP
+        streamer = streamer.replace(/^rtmp[te]*:/, 'rtmp:');
       } else {
-        return;
+        // First switch to a tunneling protocol ONLY if not tunneled.
+        if(streamer.substr(0,7) == 'rtmp://') {
+          streamer = streamer.replace('rtmp://','rtmpt://');
+        } else if(streamer.substr(0,8) == 'rtmpe://') {
+          streamer = streamer.replace('rtmpe://','rtmpte://');
+        } else {
+          return;
+        }
       }
+
       // Next hard-code port 80, stripping out any existing port designation.
+      // Failover to port 1935 for Pepper
+      var port:Number = 80;
+      if (Capabilities.manufacturer == "Google Pepper") {
+        port = 1935;
+      }
+
       var slash:Number = streamer.indexOf('/',10);
       var colon:Number = streamer.indexOf(':',10);
       if(colon > -1 && colon < slash) {
-        streamer = streamer.substr(0,colon) + ':80' + streamer.substr(slash);
+        streamer = streamer.substr(0,colon) + ':' + port + streamer.substr(slash);
       } else {
-        streamer = streamer.substr(0,slash) + ':80' + streamer.substr(slash);
+        streamer = streamer.substr(0,slash) + ':' + port + streamer.substr(slash);
       }
       
       this.serverUrlTunneled = streamer;
@@ -201,6 +218,11 @@ package {
     public function useFallbackImmediately():Boolean{
         try{
           var so:SharedObject = SharedObject.getLocal("soundmanager2");
+
+          if(so.data["firstFallbackDate"]) {
+            writeDebug('SoundManager2_SMSound_AS3: Found last fallback date ' + so.data["firstFallbackDate"]);
+          }
+
           if(so.data["firstFallbackDate"] && new Date().getTime() - new Date(so.data["firstFallbackDate"]).getTime() < 1000*60*60*24){
               return true;
           }
