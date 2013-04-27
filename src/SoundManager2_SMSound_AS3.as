@@ -133,24 +133,14 @@ package {
         }
         
         this.cc = new Object();
-        this.nc = new NetConnection();
-        
-        // Handle FMS bandwidth check callback.
-        // @see onBWDone
-        // @see http://www.adobe.com/devnet/flashmediaserver/articles/dynamic_stream_switching_04.html
-        // @see http://www.johncblandii.com/index.php/2007/12/fms-a-quick-fix-for-missing-onbwdone-onfcsubscribe-etc.html
-        this.nc.client = this;
-        
-        // TODO: security/IO error handling
-        // this.nc.addEventListener(SecurityErrorEvent.SECURITY_ERROR, doSecurityError);
-        nc.addEventListener(NetStatusEvent.NET_STATUS, netStatusHandler);
-        
-        if (this.serverUrl != null) {
-          writeDebug('SoundManager2_SMSound_AS3: NetConnection: connecting to server ' + this.serverUrl + '...');
-        }
-       
-        
+
         if(!useFallbackImmediately()){
+
+          if (this.serverUrl != null) {
+            writeDebug('SoundManager2_SMSound_AS3: NetConnection: connecting to server ' + this.serverUrl + '...');
+          }
+          // connectTunneled() includes a call to initNetConnection()
+          initNetConnection();
           this.nc.connect(serverUrl);
           tunellingFallbackTimeout = setTimeout(connectTunneled,5000);
         }else{
@@ -162,17 +152,54 @@ package {
       }
       
     }
-    
+
+    // Put all the connection initialisation in one place for reuse.
+    private function initNetConnection():void {
+        this.nc = new NetConnection();
+        
+        // Handle FMS bandwidth check callback.
+        // @see onBWDone
+        // @see http://www.adobe.com/devnet/flashmediaserver/articles/dynamic_stream_switching_04.html
+        // @see http://www.johncblandii.com/index.php/2007/12/fms-a-quick-fix-for-missing-onbwdone-onfcsubscribe-etc.html
+        this.nc.client = this;
+        
+        // TODO: security/IO error handling
+        // this.nc.addEventListener(SecurityErrorEvent.SECURITY_ERROR, doSecurityError);
+        nc.addEventListener(NetStatusEvent.NET_STATUS, netStatusHandler);
+
+        writeDebug('SoundManager2_SMSound_AS3: Created new NetConnection object');
+    } 
+
+    // Convenience method for silently killing a connection and removing
+    // references to it.
+    private function destroyNetConnection():void {
+        writeDebug('SoundManager2_SMSound_AS3: Destroying NetConnection object');
+        nc.removeEventListener(NetStatusEvent.NET_STATUS, netStatusHandler);
+        nc.close();
+        nc = null;
+    }
+
     private function connectTunneled():void
     {
-      clearTimeout(tunellingFallbackTimeout)
-      
-      if(nc.connected) return;
-      
+      // Clear the timer if it was running
+      if (tunellingFallbackTimeout) {
+        clearTimeout(tunellingFallbackTimeout)
+      }
+
+      // Try to avoid a race condition with the NetStatusEvent firing
+      if(nc && nc.connected) return;
+
       // Only attempt a connect if the server didn't respond at all.
       if(serverResponded) {
         return;
       }
+
+      // Destroy and recreate the NetConnection to avoid firing unnecessary
+      // events and wrecking the network connection flow on the first connect
+      if (nc) {
+        destroyNetConnection();
+      }
+      initNetConnection();
 
       var streamer:String = this.serverUrl;
 
@@ -209,10 +236,8 @@ package {
       
       this.serverUrlTunneled = streamer;
       
-      
       writeDebug('SoundManager2_SMSound_AS3: NetConnection: connecting TUNNELED to server ' + this.serverUrlTunneled + '...');
-      nc.connect(this.serverUrlTunneled); 
-      
+      nc.connect(this.serverUrlTunneled);
     }
     
     public function useFallbackImmediately():Boolean{
